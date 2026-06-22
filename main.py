@@ -72,17 +72,16 @@ async def init_db():
         await db.commit()
 
 
-# ── Startup hook ──────────────────────────────────────────────────────────────
-@mcp.on_startup
-async def startup():
-    await init_db()
+# ── Run schema init at import time (compatible with FastMCP 3.x) ──────────────
+import asyncio
+asyncio.run(init_db())
 
 
 # ── Expense CRUD ──────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def add_expense(date: str, amount: float, category: str,
-                      subcategory: str = "", note: str = ""):
+                    subcategory: str = "", note: str = ""):
     """Add a new expense entry to the database."""
     async with get_db() as db:
         cur = await db.execute(
@@ -112,9 +111,9 @@ async def list_expenses(start_date: str, end_date: str):
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """SELECT id, date, amount, category, subcategory, note
-               FROM expenses
-               WHERE date BETWEEN ? AND ?
-               ORDER BY date DESC, id DESC""",
+            FROM expenses
+            WHERE date BETWEEN ? AND ?
+            ORDER BY date DESC, id DESC""",
             (start_date, end_date)
         )
         rows = await cur.fetchall()
@@ -123,8 +122,8 @@ async def list_expenses(start_date: str, end_date: str):
 
 @mcp.tool()
 async def update_expense(id: int, date: str = None, amount: float = None,
-                         category: str = None, subcategory: str = None,
-                         note: str = None):
+                        category: str = None, subcategory: str = None,
+                        note: str = None):
     """Update one or more fields of an existing expense entry."""
     async with get_db() as db:
         cur = await db.execute("SELECT id FROM expenses WHERE id = ?", (id,))
@@ -132,7 +131,7 @@ async def update_expense(id: int, date: str = None, amount: float = None,
             return {"status": "error", "message": f"No expense found with id {id}"}
 
         fields = {"date": date, "amount": amount, "category": category,
-                  "subcategory": subcategory, "note": note}
+                "subcategory": subcategory, "note": note}
         updates = {k: v for k, v in fields.items() if v is not None}
         if not updates:
             return {"status": "error", "message": "No valid fields provided to update."}
@@ -169,9 +168,9 @@ async def delete_expense(id: int):
 
 @mcp.tool()
 async def search_expenses(keyword: str = None, category: str = None,
-                          subcategory: str = None, min_amount: float = None,
-                          max_amount: float = None, start_date: str = None,
-                          end_date: str = None):
+                        subcategory: str = None, min_amount: float = None,
+                        max_amount: float = None, start_date: str = None,
+                        end_date: str = None):
     """Search and filter expenses by keyword, category, subcategory, or amount range."""
     async with get_db() as db:
         query = "SELECT * FROM expenses WHERE 1=1"
@@ -211,11 +210,11 @@ async def summarize(start_date: str, end_date: str, category: str = None):
     async with get_db() as db:
         query = """
             SELECT category, subcategory,
-                   COUNT(*)     AS count,
-                   SUM(amount)  AS total,
-                   AVG(amount)  AS average,
-                   MIN(amount)  AS min,
-                   MAX(amount)  AS max
+                COUNT(*)     AS count,
+                SUM(amount)  AS total,
+                AVG(amount)  AS average,
+                MIN(amount)  AS min,
+                MAX(amount)  AS max
             FROM expenses
             WHERE date BETWEEN ? AND ?
         """
@@ -234,7 +233,7 @@ async def summarize(start_date: str, end_date: str, category: str = None):
 
 @mcp.tool()
 async def export_expenses(start_date: str, end_date: str,
-                          format: str = "csv", category: str = None):
+                        format: str = "csv", category: str = None):
     """Export expenses as CSV or JSON for a given date range. format: 'csv' or 'json'."""
     async with get_db() as db:
         query = "SELECT * FROM expenses WHERE date BETWEEN ? AND ?"
@@ -275,13 +274,13 @@ async def set_budget(category: str, month: str, amount: float):
     async with get_db() as db:
         await db.execute(
             """INSERT INTO budgets(category, month, amount) VALUES (?, ?, ?)
-               ON CONFLICT(category, month) DO UPDATE SET amount = excluded.amount""",
+            ON CONFLICT(category, month) DO UPDATE SET amount = excluded.amount""",
             (category, month, amount)
         )
         await db.commit()
         cur = await db.execute(
             """SELECT COALESCE(SUM(amount), 0) FROM expenses
-               WHERE LOWER(category) = LOWER(?) AND date BETWEEN ? AND ?""",
+            WHERE LOWER(category) = LOWER(?) AND date BETWEEN ? AND ?""",
             (category, f"{month}-01", f"{month}-31")
         )
         spent = (await cur.fetchone())[0]
@@ -300,8 +299,8 @@ async def get_budget_status(month: str):
         budgets = await cur.fetchall()
         cur = await db.execute(
             """SELECT LOWER(category), SUM(amount)
-               FROM expenses WHERE date BETWEEN ? AND ?
-               GROUP BY LOWER(category)""",
+            FROM expenses WHERE date BETWEEN ? AND ?
+            GROUP BY LOWER(category)""",
             (f"{month}-01", f"{month}-31")
         )
         spend_map = dict(await cur.fetchall())
@@ -328,7 +327,7 @@ async def add_recurring(amount: float, category: str, frequency: str,
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO recurring(amount, category, subcategory, note, frequency, next_date)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?)""",
             (amount, category, subcategory, note, frequency, start_date)
         )
         await db.commit()
@@ -351,9 +350,9 @@ async def process_recurring():
             rid, amount, category, subcategory, note, frequency, next_date, _ = row
             await db.execute(
                 """INSERT INTO expenses(date, amount, category, subcategory, note)
-                   VALUES (?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?)""",
                 (next_date, amount, category, subcategory,
-                 f"{note} (recurring)".strip())
+                f"{note} (recurring)".strip())
             )
             nd = date.fromisoformat(next_date)
             if frequency == "daily":
@@ -368,7 +367,7 @@ async def process_recurring():
                 "UPDATE recurring SET next_date = ? WHERE id = ?", (next_str, rid)
             )
             logged.append({"recurring_id": rid, "note": note, "amount": amount,
-                           "logged_date": next_date, "next_date": next_str})
+                        "logged_date": next_date, "next_date": next_str})
 
         await db.commit()
 
