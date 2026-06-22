@@ -1,35 +1,35 @@
 from fastmcp import FastMCP
 import os
+import sqlite3
 import aiosqlite
+import tempfile
 import json
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+# Use /tmp — always writable in Docker/cloud containers.
+# os.path.dirname(__file__) is the app directory, which is read-only after build.
+TEMP_DIR = tempfile.gettempdir()
+DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
 CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
+
+print(f"Database path: {DB_PATH}")
 
 mcp = FastMCP("ExpenseTracker")
 
 
-# ── DB helper: returns a write-enabled async connection ───────────────────────
+# ── Async DB helper for tool handlers ─────────────────────────────────────────
 def get_db():
-    """
-    Opens an aiosqlite connection with WAL mode (safe concurrent writes)
-    and a 5-second busy timeout so parallel requests queue instead of crash.
-    Use as:  async with get_db() as db: ...
-    """
     return aiosqlite.connect(DB_PATH, timeout=5)
 
 
-# ── Schema init (runs once at startup, synchronously) ─────────────────────────
-async def init_db():
-    async with get_db() as db:
-        # Enable WAL journal for concurrent read + write
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA foreign_keys=ON")
-
-        await db.execute("""
+# ── Schema init: plain sync sqlite3, safe at import time ──────────────────────
+def init_db():
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA foreign_keys=ON")
+        c.execute("""
             CREATE TABLE IF NOT EXISTS expenses(
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 date        TEXT NOT NULL,
@@ -39,7 +39,7 @@ async def init_db():
                 note        TEXT DEFAULT ''
             )
         """)
-        await db.execute("""
+        c.execute("""
             CREATE TABLE IF NOT EXISTS budgets(
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 category TEXT NOT NULL,
@@ -48,7 +48,7 @@ async def init_db():
                 UNIQUE(category, month)
             )
         """)
-        await db.execute("""
+        c.execute("""
             CREATE TABLE IF NOT EXISTS recurring(
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 amount      REAL NOT NULL,
@@ -60,7 +60,7 @@ async def init_db():
                 active      INTEGER DEFAULT 1
             )
         """)
-        await db.execute("""
+        c.execute("""
             CREATE TABLE IF NOT EXISTS income(
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 date    TEXT NOT NULL,
@@ -69,19 +69,20 @@ async def init_db():
                 note    TEXT DEFAULT ''
             )
         """)
-        await db.commit()
+        # Verify write access
+        c.execute("INSERT OR IGNORE INTO expenses(date, amount, category) VALUES ('2000-01-01', 0, 'test')")
+        c.execute("DELETE FROM expenses WHERE category = 'test'")
+        c.commit()
+        print("Database initialized successfully with write access")
 
-
-# ── Run schema init at import time (compatible with FastMCP 3.x) ──────────────
-import asyncio
-asyncio.run(init_db())
+init_db()
 
 
 # ── Expense CRUD ──────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def add_expense(date: str, amount: float, category: str,
-                    subcategory: str = "", note: str = ""):
+                      subcategory: str = "", note: str = ""):
     """Add a new expense entry to the database."""
     async with get_db() as db:
         cur = await db.execute(
@@ -111,9 +112,9 @@ async def list_expenses(start_date: str, end_date: str):
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """SELECT id, date, amount, category, subcategory, note
-            FROM expenses
-            WHERE date BETWEEN ? AND ?
-            ORDER BY date DESC, id DESC""",
+               FROM expenses
+               WHERE date BETWEEN ? AND ?
+               ORDER BY date DESC, id DESC""",
             (start_date, end_date)
         )
         rows = await cur.fetchall()
@@ -122,8 +123,8 @@ async def list_expenses(start_date: str, end_date: str):
 
 @mcp.tool()
 async def update_expense(id: int, date: str = None, amount: float = None,
-                        category: str = None, subcategory: str = None,
-                        note: str = None):
+                         category: str = None, subcategory: str = None,
+                         note: str = None):
     """Update one or more fields of an existing expense entry."""
     async with get_db() as db:
         cur = await db.execute("SELECT id FROM expenses WHERE id = ?", (id,))
@@ -131,7 +132,7 @@ async def update_expense(id: int, date: str = None, amount: float = None,
             return {"status": "error", "message": f"No expense found with id {id}"}
 
         fields = {"date": date, "amount": amount, "category": category,
-                "subcategory": subcategory, "note": note}
+                  "subcategory": subcategory, "note": note}
         updates = {k: v for k, v in fields.items() if v is not None}
         if not updates:
             return {"status": "error", "message": "No valid fields provided to update."}
@@ -168,9 +169,9 @@ async def delete_expense(id: int):
 
 @mcp.tool()
 async def search_expenses(keyword: str = None, category: str = None,
-                        subcategory: str = None, min_amount: float = None,
-                        max_amount: float = None, start_date: str = None,
-                        end_date: str = None):
+                          subcategory: str = None, min_amount: float = None,
+                          max_amount: float = None, start_date: str = None,
+                          end_date: str = None):
     """Search and filter expenses by keyword, category, subcategory, or amount range."""
     async with get_db() as db:
         query = "SELECT * FROM expenses WHERE 1=1"
@@ -210,11 +211,11 @@ async def summarize(start_date: str, end_date: str, category: str = None):
     async with get_db() as db:
         query = """
             SELECT category, subcategory,
-                COUNT(*)     AS count,
-                SUM(amount)  AS total,
-                AVG(amount)  AS average,
-                MIN(amount)  AS min,
-                MAX(amount)  AS max
+                   COUNT(*)     AS count,
+                   SUM(amount)  AS total,
+                   AVG(amount)  AS average,
+                   MIN(amount)  AS min,
+                   MAX(amount)  AS max
             FROM expenses
             WHERE date BETWEEN ? AND ?
         """
@@ -233,7 +234,7 @@ async def summarize(start_date: str, end_date: str, category: str = None):
 
 @mcp.tool()
 async def export_expenses(start_date: str, end_date: str,
-                        format: str = "csv", category: str = None):
+                          format: str = "csv", category: str = None):
     """Export expenses as CSV or JSON for a given date range. format: 'csv' or 'json'."""
     async with get_db() as db:
         query = "SELECT * FROM expenses WHERE date BETWEEN ? AND ?"
@@ -274,13 +275,13 @@ async def set_budget(category: str, month: str, amount: float):
     async with get_db() as db:
         await db.execute(
             """INSERT INTO budgets(category, month, amount) VALUES (?, ?, ?)
-            ON CONFLICT(category, month) DO UPDATE SET amount = excluded.amount""",
+               ON CONFLICT(category, month) DO UPDATE SET amount = excluded.amount""",
             (category, month, amount)
         )
         await db.commit()
         cur = await db.execute(
             """SELECT COALESCE(SUM(amount), 0) FROM expenses
-            WHERE LOWER(category) = LOWER(?) AND date BETWEEN ? AND ?""",
+               WHERE LOWER(category) = LOWER(?) AND date BETWEEN ? AND ?""",
             (category, f"{month}-01", f"{month}-31")
         )
         spent = (await cur.fetchone())[0]
@@ -299,8 +300,8 @@ async def get_budget_status(month: str):
         budgets = await cur.fetchall()
         cur = await db.execute(
             """SELECT LOWER(category), SUM(amount)
-            FROM expenses WHERE date BETWEEN ? AND ?
-            GROUP BY LOWER(category)""",
+               FROM expenses WHERE date BETWEEN ? AND ?
+               GROUP BY LOWER(category)""",
             (f"{month}-01", f"{month}-31")
         )
         spend_map = dict(await cur.fetchall())
@@ -327,7 +328,7 @@ async def add_recurring(amount: float, category: str, frequency: str,
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO recurring(amount, category, subcategory, note, frequency, next_date)
-            VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (amount, category, subcategory, note, frequency, start_date)
         )
         await db.commit()
@@ -350,9 +351,9 @@ async def process_recurring():
             rid, amount, category, subcategory, note, frequency, next_date, _ = row
             await db.execute(
                 """INSERT INTO expenses(date, amount, category, subcategory, note)
-                VALUES (?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?)""",
                 (next_date, amount, category, subcategory,
-                f"{note} (recurring)".strip())
+                 f"{note} (recurring)".strip())
             )
             nd = date.fromisoformat(next_date)
             if frequency == "daily":
@@ -367,7 +368,7 @@ async def process_recurring():
                 "UPDATE recurring SET next_date = ? WHERE id = ?", (next_str, rid)
             )
             logged.append({"recurring_id": rid, "note": note, "amount": amount,
-                        "logged_date": next_date, "next_date": next_str})
+                           "logged_date": next_date, "next_date": next_str})
 
         await db.commit()
 
@@ -416,10 +417,20 @@ async def get_balance(start_date: str, end_date: str):
 # ── Resource ──────────────────────────────────────────────────────────────────
 
 @mcp.resource("expense://categories", mime_type="application/json")
-async def categories():
-    """Read fresh each time so you can edit the file without restarting."""
-    with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+def categories():
+    """Read categories from file, fall back to defaults if file not found."""
+    default_categories = {
+        "categories": [
+            "Food & Dining", "Transportation", "Shopping",
+            "Entertainment", "Bills & Utilities", "Healthcare",
+            "Travel", "Education", "Business", "Other"
+        ]
+    }
+    try:
+        with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return json.dumps(default_categories, indent=2)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
